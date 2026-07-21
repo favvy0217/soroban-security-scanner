@@ -25,19 +25,130 @@ const DEFAULT_OPTIONS: Required<FileValidationOptions> = {
   maxFiles: 5,
 };
 
+// Magic byte signatures for file type validation
+// WASM files start with \0asm (0x00, 0x61, 0x73, 0x6d)
+const WASM_MAGIC_BYTES = [0x00, 0x61, 0x73, 0x6d];
+
+// Rust source file keywords to check in the first non-whitespace line
+const RUST_KEYWORDS = ['use ', '//!', '#! ', '#![', 'pub ', 'mod ', 'fn ', 'impl ', 'trait ', 'struct ', 'enum ', 'const ', 'static ', 'crate '];
+
+// Default max file sizes per type (in MB)
+const DEFAULT_MAX_SIZES: Record<string, number> = {
+  '.wasm': 10,
+  '.rs': 5,
+  '.toml': 2,
+  '.txt': 2,
+};
+
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
-function validateFile(file: File, options: Required<FileValidationOptions>): string | null {
-  const maxBytes = options.maxSizeMB * 1024 * 1024;
-  if (file.size > maxBytes) {
-    return `File exceeds ${options.maxSizeMB}MB limit`;
+/**
+ * Read the first N bytes of a file as a Uint8Array.
+ * Uses FileReader.readAsArrayBuffer() to read file content client-side.
+ */
+function readFileBytes(file: File, numBytes: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const buffer = e.target?.result as ArrayBuffer;
+      resolve(new Uint8Array(buffer.slice(0, numBytes)));
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsArrayBuffer(file.slice(0, numBytes));
+  });
+}
+
+/**
+ * Read the first non-whitespace line of a text file.
+ * Used for Rust source file validation.
+ */
+async function readFirstLine(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      const lines = text.split('\n');
+      // Find first non-whitespace line
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.length > 0) {
+          resolve(trimmed);
+          return;
+        }
+      }
+      resolve('');
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    // Read first 1KB for text validation
+    reader.readAsText(file.slice(0, 1024));
+  });
+}
+
+/**
+ * Validate file magic bytes (content-based validation, not extension-based).
+ * This prevents users from uploading renamed files (e.g., malware.exe → contract.wasm).
+ *
+ * @param file The file to validate
+ * @returns null if valid, error message string if invalid
+ */
+async function validateMagicBytes(file: File): Promise<string | null> {
+  const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+
+  if (ext === '.wasm') {
+    // WASM files must start with \0asm magic bytes
+    try {
+      const bytes = await readFileBytes(file, 4);
+      for (let i = 0; i < 4; i++) {
+        if (bytes[i] !== WASM_MAGIC_BYTES[i]) {
+          return 'This file does not appear to be a valid WASM binary (magic bytes mismatch)';
+        }
+      }
+    } catch {
+      return 'Unable to read file content for validation';
+    }
+  } else if (ext === '.rs') {
+    // Rust source files should start with a recognized Rust keyword
+    try {
+      const firstLine = await readFirstLine(file);
+      if (firstLine.length === 0) {
+        return 'File appears to be empty';
+      }
+      const isValidRust = RUST_KEYWORDS.some(kw => firstLine.startsWith(kw));
+      if (!isValidRust) {
+        return 'This file does not appear to be a valid Rust source file';
+      }
+    } catch {
+      return 'Unable to read file content for validation';
+    }
   }
 
-  const ext = '.' + file.name.split('.').pop()?.toLowerCase();
-  const mime = file.type;
+  return null; // File is valid
+}
 
+/**
+ * Get the max file size for a given file extension.
+ * Falls back to the default maxSizeMB if no specific limit is set.
+ */
+function getMaxSizeForType(ext: string, defaultMaxMB: number): number {
+  return DEFAULT_MAX_SIZES[ext] ?? defaultMaxMB;
+}
+
+function validateFile(file: File, options: Required<FileValidationOptions>): string | null {
+  const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+  const maxBytes = getMaxSizeForType(ext, options.maxSizeMB) * 1024 * 1024;
+
+  if (file.size > maxBytes) {
+    const limitMB = getMaxSizeForType(ext, options.maxSizeMB);
+    return `File exceeds the ${limitMB}MB size limit`;
+  }
+
+  if (file.size === 0) {
+    return 'File is empty';
+  }
+
+  const mime = file.type;
   const isAllowedExt = options.allowedTypes.some(t => (t.startsWith('.') ? t === ext : t === mime));
   if (!isAllowedExt) {
     return `File type "${ext}" is not allowed. Accepted: ${options.allowedTypes.join(', ')}`;
@@ -110,9 +221,17 @@ export function useFileUpload(options: FileValidationOptions = {}) {
         updateFile(entry.id, { status: 'validating' });
         await new Promise(r => setTimeout(r, 150));
 
-        const error = validateFile(entry.file, opts);
-        if (error) {
-          updateFile(entry.id, { status: 'error', error });
+        // Step 1: Basic validation (extension, size)
+        const basicError = validateFile(entry.file, opts);
+        if (basicError) {
+          updateFile(entry.id, { status: 'error', error: basicError });
+          continue;
+        }
+
+        // Step 2: Magic byte validation (content-based, prevents renamed files)
+        const magicError = await validateMagicBytes(entry.file);
+        if (magicError) {
+          updateFile(entry.id, { status: 'error', error: magicError });
           continue;
         }
 
@@ -194,6 +313,12 @@ export function useFileUpload(options: FileValidationOptions = {}) {
     [opts, simulateUpload]
   );
 
+  const cancelUpload = useCallback((id: string) => {
+    abortRefs.current[id]?.abort();
+    delete abortRefs.current[id];
+    updateFile(id, { status: 'error' as FileStatus, error: 'Upload cancelled', progress: 0 });
+  }, [updateFile]);
+
   const clearAll = useCallback(() => {
     const controllers = Object.keys(abortRefs.current).map(k => abortRefs.current[k]);
     controllers.forEach((c: AbortController) => c.abort());
@@ -222,6 +347,7 @@ export function useFileUpload(options: FileValidationOptions = {}) {
     onInputChange,
     removeFile,
     retryFile,
+    cancelUpload,
     clearAll,
   };
 }

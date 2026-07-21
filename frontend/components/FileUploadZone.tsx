@@ -64,10 +64,12 @@ function FileRow({
   entry,
   onRemove,
   onRetry,
+  onCancel,
 }: {
   entry: UploadedFile;
   onRemove: (id: string) => void;
   onRetry: (id: string) => void;
+  onCancel: (id: string) => void;
 }) {
   const { id, file, status, progress, error, preview } = entry;
 
@@ -91,6 +93,15 @@ function FileRow({
             <span className={`text-xs font-medium ${STATUS_COLORS[status]}`}>
               {STATUS_LABELS[status]}
             </span>
+            {status === 'uploading' && (
+              <button
+                onClick={() => onCancel(id)}
+                className="text-xs text-red-500 hover:underline"
+                aria-label={`Cancel uploading ${file.name}`}
+              >
+                Cancel
+              </button>
+            )}
             {status === 'error' && (
               <button
                 onClick={() => onRetry(id)}
@@ -150,6 +161,7 @@ export default function FileUploadZone({
     onInputChange,
     removeFile,
     retryFile,
+    cancelUpload,
     clearAll,
   } = useFileUpload({ maxSizeMB, allowedTypes, maxFiles });
 
@@ -240,7 +252,7 @@ export default function FileUploadZone({
 
           <ul className="space-y-2" role="list" aria-label="Uploaded files">
             {files.map(entry => (
-              <FileRow key={entry.id} entry={entry} onRemove={removeFile} onRetry={retryFile} />
+              <FileRow key={entry.id} entry={entry} onRemove={removeFile} onRetry={retryFile} onCancel={cancelUpload} />
             ))}
           </ul>
 
