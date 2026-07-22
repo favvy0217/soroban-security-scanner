@@ -3,8 +3,8 @@ import { useFileUpload } from '../hooks/useFileUpload';
 
 // Helper: create a File with specific content
 function createFile(name: string, content: Uint8Array | string, type = ''): File {
-  const bytes = typeof content === 'string' 
-    ? new TextEncoder().encode(content) 
+  const bytes = typeof content === 'string'
+    ? new Uint8Array(content.split('').map(c => c.charCodeAt(0)))
     : content;
   return new File([bytes], name, { type });
 }
@@ -29,7 +29,6 @@ describe('useFileUpload — Magic Byte Validation', () => {
       result.current.onInputChange({
         target: { files: [validWasm] },
       } as any);
-      // Allow async validation to complete
       await Promise.resolve();
       await Promise.resolve();
       jest.advanceTimersByTime(500);
@@ -37,13 +36,11 @@ describe('useFileUpload — Magic Byte Validation', () => {
 
     const file = result.current.files[0];
     expect(file).toBeDefined();
-    // File should pass validation (not be in error state with magic byte message)
     expect(file.error).not.toContain('does not appear to be a valid WASM');
   });
 
   it('rejects a .wasm file with wrong magic bytes (renamed .exe)', async () => {
     const { result } = renderHook(() => useFileUpload());
-    // MZ header (Windows executable) renamed as .wasm
     const exeBytes = new Uint8Array([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]);
     const fakeWasm = createFile('malware.wasm', exeBytes, 'application/wasm');
 
@@ -96,7 +93,6 @@ describe('useFileUpload — Magic Byte Validation', () => {
 
     const file = result.current.files[0];
     expect(file).toBeDefined();
-    // Should not have a magic byte error
     expect(file.error).not.toContain('does not appear to be a valid Rust');
   });
 
