@@ -240,7 +240,7 @@ export default function FileUploadZone({
 
           <ul className="space-y-2" role="list" aria-label="Uploaded files">
             {files.map(entry => (
-              <FileRow key={entry.id} entry={entry} onRemove={removeFile} onRetry={retryFile} />
+              <FileRow key={entry.id} entry={entry} onRemove={removeFile} onRetry={retryFile} onCancel={cancelUpload} />
             ))}
           </ul>
 

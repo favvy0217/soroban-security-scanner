@@ -25,22 +25,100 @@ const DEFAULT_OPTIONS: Required<FileValidationOptions> = {
   maxFiles: 5,
 };
 
+// ── Issue #432: Client-side magic byte detection ──────────────────────────────
+// WASM files start with the magic bytes \0asm (0x00, 0x61, 0x73, 0x6d)
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+
+// Rust source files typically start with these keywords on the first non-whitespace line
+const RUST_PREFIXES = ['use', '//!', '#!', 'pub', 'mod', 'fn', 'impl', 'trait', 'struct', 'enum', 'const', 'static', 'macro'];
+
+// Per-extension max file sizes (Issue #432)
+const EXT_MAX_SIZE_MB: Record<string, number> = {
+  '.wasm': 10,
+  '.rs': 5,
+  '.toml': 1,
+  '.txt': 1,
+};
+
+/**
+ * Read the first N bytes of a file as an array buffer.
+ */
+function readFileHeader(file: File, bytes: number): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const buf = e.target?.result as ArrayBuffer;
+      if (!buf) { resolve(new Uint8Array(0)); return; }
+      resolve(new Uint8Array(buf.slice(0, bytes)));
+    };
+    reader.onerror = () => reject(new Error('Failed to read file header'));
+    reader.readAsArrayBuffer(file.slice(0, bytes));
+  });
+}
+
+/**
+ * Validate file magic bytes against known signatures (Issue #432).
+ * Returns null if valid, or an error message if the content doesn't match the extension.
+ */
+async function validateMagicBytes(file: File): Promise<string | null> {
+  const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+
+  if (ext === '.wasm') {
+    // WASM files must start with \0asm magic bytes
+    const header = await readFileHeader(file, 4);
+    if (header.length < 4) {
+      return 'This file is too small to be a valid WASM binary';
+    }
+    const isWasm = WASM_MAGIC.every((byte, i) => header[i] === byte);
+    if (!isWasm) {
+      return 'This file does not appear to be a valid WASM binary (missing \\0asm magic header)';
+    }
+  } else if (ext === '.rs') {
+    // Rust source files should start with a known Rust keyword or comment
+    const header = await readFileHeader(file, 512);
+    if (header.length === 0) {
+      return 'This file is empty and does not appear to be valid Rust source code';
+    }
+    const text = new TextDecoder().decode(header).trimStart();
+    if (text.length === 0) {
+      return 'This file contains only whitespace and does not appear to be valid Rust source code';
+    }
+    const firstLine = text.split('\n')[0].trim();
+    const isRust = RUST_PREFIXES.some(prefix => firstLine.startsWith(prefix));
+    if (!isRust) {
+      return 'This file does not appear to be valid Rust source code (unexpected first line)';
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Get the max file size for a given extension (Issue #432).
+ */
+function getMaxSizeForExt(ext: string): number {
+  return EXT_MAX_SIZE_MB[ext] ?? 10;
+}
+
 function generateId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
 function validateFile(file: File, options: Required<FileValidationOptions>): string | null {
-  const maxBytes = options.maxSizeMB * 1024 * 1024;
-  if (file.size > maxBytes) {
-    return `File exceeds ${options.maxSizeMB}MB limit`;
-  }
-
   const ext = '.' + file.name.split('.').pop()?.toLowerCase();
   const mime = file.type;
 
+  // Check extension/MIME first (quick check)
   const isAllowedExt = options.allowedTypes.some(t => (t.startsWith('.') ? t === ext : t === mime));
   if (!isAllowedExt) {
     return `File type "${ext}" is not allowed. Accepted: ${options.allowedTypes.join(', ')}`;
+  }
+
+  // Per-extension size limit (Issue #432)
+  const maxSizeMB = getMaxSizeForExt(ext);
+  const maxBytes = maxSizeMB * 1024 * 1024;
+  if (file.size > maxBytes) {
+    return `File exceeds the ${maxSizeMB}MB size limit for ${ext} files`;
   }
 
   return null;
@@ -204,6 +282,13 @@ export function useFileUpload(options: FileValidationOptions = {}) {
     });
   }, []);
 
+  // Issue #432: Cancel an in-flight upload
+  const cancelUpload = useCallback((id: string) => {
+    abortRefs.current[id]?.abort();
+    delete abortRefs.current[id];
+    updateFile(id, { status: 'error', progress: 0, error: 'Upload cancelled by user' });
+  }, [updateFile]);
+
   const canAddMore = files.length < opts.maxFiles;
   const allComplete = files.length > 0 && files.every((f: UploadedFile) => f.status === 'complete');
 
@@ -222,6 +307,7 @@ export function useFileUpload(options: FileValidationOptions = {}) {
     onInputChange,
     removeFile,
     retryFile,
+    cancelUpload,
     clearAll,
   };
 }
